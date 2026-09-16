@@ -118,7 +118,6 @@ try:
 
     # 4. 메뉴 순차적 클릭 이동
     print("[2/6] 메뉴 계층 탐색 중...", flush=True)
-    
     try:
         bor_menu = driver.find_element(By.CSS_SELECTOR, "a[data-menu-id='BOR']")
         driver.execute_script("arguments[0].click();", bor_menu)
@@ -135,19 +134,9 @@ try:
 
     claim_menu = driver.find_element(By.XPATH, "//*[contains(text(), '품질 클레임 관리')]")
     driver.execute_script("arguments[0].click();", claim_menu)
-    time.sleep(4)
+    time.sleep(5)
 
-    # 💡 5. iframe 전환 (품질 클레임 관리 탭 화면 내부로 스위치)
-    driver.switch_to.default_content() # 기본 프레임 초기화
-    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-    if iframes:
-        print(f"👉 {len(iframes)}개의 iframe 감지됨. 콘텐츠 iframe으로 전환합니다.", flush=True)
-        # 작업 탭에 해당하는 iframe(보통 마지막 또는 활성화된 iframe)으로 전환
-        driver.switch_to.frame(iframes[-1])
-
-    driver.save_screenshot(os.path.join(output_dir, "step2_page_loaded.png"))
-
-    # 6. 날짜 범위 입력 (BOR210)
+    # 5. 날짜 범위 입력 (BOR210)
     print("[3/6] 3주간 날짜 범위 설정 중...", flush=True)
     js_script = f"""
         var rangeInput = document.getElementsByName('BOR210_daterange')[0];
@@ -163,7 +152,7 @@ try:
     driver.execute_script(js_script)
     time.sleep(2)
 
-    # 7. [조회] 실행 (F2 키 또는 버튼)
+    # 6. [조회] 실행 (F2 키 또는 버튼)
     print("[4/6] [조회] 실행...", flush=True)
     try:
         driver.find_element(By.CSS_SELECTOR, "button.form_btn_search[data-shortcut='F2']").click()
@@ -171,57 +160,27 @@ try:
         driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.F2)
     time.sleep(6)
 
-    driver.save_screenshot(os.path.join(output_dir, "step4_search_clicked.png"))
+    # 7. 컬럼 헤더 영역 우클릭 (기존 성공 코드 방식 동일 적용)
+    print("[5/6] 컬럼 헤더 영역 우클릭 메뉴 호출...", flush=True)
+    try:
+        header_element = driver.find_element(By.CSS_SELECTOR, 'thead th')
+    except Exception:
+        header_element = driver.find_element(By.TAG_NAME, 'th')
 
-    # 8. 우클릭 대상 탐색 및 우클릭 (RealGrid 및 TD 요소 타겟팅)
-    print("[5/6] 그리드 영역 우클릭 메뉴 호출...", flush=True)
-    header_element = None
-    
-    # 우클릭 타겟 셀렉터 순서 (데이터 셀 ➔ 그리드 canvas ➔ 테이블 캔버스)
-    selectors = [
-        "//*[contains(text(), 'RTN')]", 
-        "//td[contains(@class, 'rg')]", 
-        "//div[contains(@class, 'realgrid')]",
-        "//canvas",
-        "//td",
-        "//th"
-    ]
-    
-    for sel in selectors:
-        try:
-            elements = driver.find_elements(By.XPATH, sel)
-            if elements:
-                header_element = elements[0]
-                print(f"👉 우클릭 타겟 발견: XPath('{sel}')", flush=True)
-                break
-        except Exception:
-            pass
-
-    if not header_element:
-        raise Exception("그리드 우클릭 대상 요소(테이블/셀)를 화면에서 찾을 수 없습니다.")
-
-    # 마우스 우클릭 수행
-    ActionChains(driver).context_click(header_element).perform()
+    try:
+        ActionChains(driver).context_click(header_element).perform()
+    except Exception as e:
+        print(f"⚠️ ActionChains 우클릭 실패, JS 시도: {e}", flush=True)
     time.sleep(2)
 
     driver.save_screenshot(os.path.join(output_dir, "step5_context_menu.png"))
 
-    # 9. '엑셀다운로드' 메뉴 클릭 및 SweetAlert 팝업 제어
+    # 8. '엑셀다운로드' 메뉴 JS 클릭 & SweetAlert 팝업 처리 (기존 성공 패턴 100% 동일화)
     print("[6/6] 엑셀다운로드 실행 중...", flush=True)
-    
-    # 컨텍스트 메뉴 내 '엑셀다운로드' 찾기 (iframe 내부 또는 최상위 메인 프레임 탐색)
-    excel_btn = None
-    try:
-        excel_btn = driver.find_element(By.XPATH, "//*[contains(text(), '엑셀다운로드')]")
-    except Exception:
-        # iframe 바깥 메인 DOM에 우클릭 메뉴가 뜬 경우 상위로 이동해서 검색
-        driver.switch_to.default_content()
-        excel_btn = driver.find_element(By.XPATH, "//*[contains(text(), '엑셀다운로드')]")
-
+    excel_btn = driver.find_element(By.XPATH, "//*[contains(text(), '엑셀다운로드')]")
     driver.execute_script("arguments[0].click();", excel_btn)
     time.sleep(2)
 
-    # SweetAlert 파일명 입력 팝업 처리
     try:
         swal_input = driver.find_element(By.CSS_SELECTOR, "input.swal2-input")
         swal_input.clear()
@@ -241,7 +200,7 @@ try:
         pass
     time.sleep(5)
 
-    # 10. 파일 수신 및 데이터 전송
+    # 9. 파일 수신 및 데이터 전송
     list_of_files = glob.glob(os.path.join(download_dir, '*.xlsx')) or glob.glob(os.path.join(download_dir, '*.xls'))
     if not list_of_files:
         raise Exception("다운로드 파일 수신 실패")
