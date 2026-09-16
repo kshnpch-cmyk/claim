@@ -1,21 +1,19 @@
 import os
 import json
+import requests
 import pandas as pd
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
-import gspread
-from google.oauth2.service_account import Credentials
 
 # ==========================================
-# 환경 변수 및 상수 설정
+# 환경 변수 및 설정
 # ==========================================
 LOGIN_URL = "https://admin.theborn.co.kr/oms-manager/login"
-SPREADSHEET_KEY = "16lfX5WG4cPnRLZe2k8quGLWA_oF1xpI79ppAE4VMzGk" # 제공해주신 시트 Key
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxFmxSGgRypmiO-bi4Xrs52r-mqWdV-JGHVRU762_txBxR3d3LXn7XDiJo6KbtMbfe1/exec"
 
 COMPANY_CD = os.environ.get("COMPANY_CD")
 USER_ID = os.environ.get("USER_ID")
 USER_PW = os.environ.get("USER_PW")
-GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 
 
 def calculate_dates():
@@ -41,11 +39,11 @@ def download_excel_file():
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
 
-        print("[1/6] 로그인 페이지 접속 중...")
+        print("[1/6] OMS 로그인 페이지 접속...")
         page.goto(LOGIN_URL)
         page.wait_for_load_state("networkidle")
 
-        print("[2/6] 로그인 정보 입력 중...")
+        print("[2/6] 로그인 정보 입력...")
         page.fill('#companyCd', COMPANY_CD)
         page.fill('#userId', USER_ID)
         page.fill('#userPw', USER_PW)
@@ -59,7 +57,7 @@ def download_excel_file():
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(2000)
 
-        print("[4/6] 3주간 날짜 범위 설정 중...")
+        print("[4/6] 3주간 날짜 범위 설정...")
         page.fill('input[name="BOR210_daterange"]', daterange)
         
         page.evaluate(f'''() => {{
@@ -69,12 +67,12 @@ def download_excel_file():
             if (endInput) endInput.value = "{end_dt}";
         }}''')
 
-        print("[5/6] 우상단 [조회] 버튼 클릭...")
+        print("[5/6] [조회] 버튼 클릭...")
         page.click('button:has-text("조회"), a:has-text("조회"), input[value="조회"]')
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(2000)
 
-        print("[6/6] 그리드 우클릭 ➔ 팝업창 파일명 입력 ➔ 다운로드...")
+        print("[6/6] 그리드 우클릭 ➔ 엑셀다운로드 팝업 ➔ 다운로드...")
         target_cell = page.locator('td:has-text("RTN"), th:has-text("반품번호")').first
         target_cell.click(button="right")
         page.wait_for_timeout(500)
@@ -98,60 +96,46 @@ def download_excel_file():
         return file_path
 
 
-def update_google_sheet(excel_file_path):
+def send_data_to_google_sheet(excel_file_path):
     if not excel_file_path or not os.path.exists(excel_file_path):
-        print("업데이트할 엑셀 파일이 존재하지 않습니다.")
+        print("전송할 엑셀 파일이 존재하지 않습니다.")
         return
 
-    print("📊 [구글 시트] 데이터 변환 및 업로드 시작...")
+    print("🚀 Google Apps Script 웹앱으로 데이터 전송 시작...")
 
-    # 1. 다운로드받은 엑셀 파일 읽기
+    # 1. 다운로드된 엑셀/CSV 읽기
     try:
         df = pd.read_excel(excel_file_path)
     except Exception:
         df = pd.read_csv(excel_file_path)
 
-    # 데이터 내 빈값(NaN)을 빈 문자열("")로 대체
-    df = df.fillna("")
+    df = df.fillna("") # 빈 데이터 처리
 
-    # 2. Google Sheets API 인증 연결
-    sa_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    credentials = Credentials.from_service_account_info(sa_info, scopes=scopes)
-    gc = gspread.authorize(credentials)
+    # 2. 데이터를 2차원 리스트(배열)로 변환
+    rows_data = df.values.tolist()
 
-    # 지정하신 시트의 첫 번째 워크시트(gid=0) 열기
-    sheet = gc.open_by_key(SPREADSHEET_KEY).sheet1
+    if not rows_data:
+        print("엑셀 파일 내 데이터가 없습니다.")
+        return
 
-    # 3. 중복 저장 방지 (기존 시트 1열에 존재하는 반품번호/클레임ID 가져오기)
-    existing_ids = set(sheet.col_values(1)[1:])
-
-    # 4. 업로드할 행 추출 (중복 제외)
-    rows_to_append = []
-    headers = list(df.columns)
-
-    # 시트가 아예 비어있는 경우 헤더(컬럼명)를 먼저 집어넣음
-    if len(sheet.get_all_values()) == 0:
-        sheet.append_row(headers)
-
-    for record in df.to_dict(orient="records"):
-        # 엑셀의 첫 번째 컬럼 값을 고유 식별키로 사용
-        first_col_val = str(record[headers[0]])
+    # 3. HTTP POST 요청 전송
+    try:
+        response = requests.post(
+            WEBAPP_URL,
+            data=json.dumps(rows_data),
+            headers={"Content-Type": "application/json"}
+        )
         
-        if first_col_val and first_col_val not in existing_ids:
-            # 엑셀 행 전체 값을 리스트 형태로 추출
-            row_data = [str(record[col]) for col in headers]
-            rows_to_append.append(row_data)
+        res_json = response.json()
+        if res_json.get("result") == "success":
+            print(f"✅ 구글 시트 업로드 성공! (신규 추가: {res_json.get('added')}건)")
+        else:
+            print(f"❌ Apps Script 오류: {res_json.get('error')}")
 
-    # 5. 구글 시트에 일괄 추가 (append)
-    if rows_to_append:
-        sheet.append_rows(rows_to_append)
-        print(f"✅ 구글 스프레드시트에 신규 클레임 {len(rows_to_append)}건 업로드 완료!")
-    else:
-        print("ℹ️ 신규로 추가할 클레임 데이터가 없습니다. (모두 기존 등록건)")
+    except Exception as e:
+        print(f"❌ HTTP 요청 실패: {e}")
 
 
 if __name__ == "__main__":
     downloaded_path = download_excel_file()
-    if downloaded_path and GOOGLE_SERVICE_ACCOUNT_JSON:
-        update_google_sheet(downloaded_path)
+    send_data_to_google_sheet(downloaded_path)
