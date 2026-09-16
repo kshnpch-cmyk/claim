@@ -116,18 +116,29 @@ try:
     driver.find_element(By.ID, 'userPw').send_keys(OMS_PW + Keys.ENTER)
     time.sleep(4)
 
-    # 4. 메뉴 클릭 이동 (Direct URL 이동 시 404 방지)
-    print("[2/6] 메뉴 클릭을 통해 '품질 클레임 관리'로 이동 중...", flush=True)
+    # 4. 메뉴 순차적 클릭 이동
+    print("[2/6] 메뉴 계층 탐색 중...", flush=True)
     
-    # 상위 메뉴 펼치기 시도 ('반품관리' 메뉴 클릭)
+    # 💡 4-1. 최좌측 1차 메뉴 대분류(주문/반품 아이콘 'BOR') 클릭
     try:
-        return_menu = driver.find_element(By.XPATH, "//*[contains(text(), '반품관리')]")
-        driver.execute_script("arguments[0].click();", return_menu)
+        bor_menu = driver.find_element(By.CSS_SELECTOR, "a[data-menu-id='BOR']")
+        driver.execute_script("arguments[0].click();", bor_menu)
+        print("👉 1차 대분류 메뉴('BOR') 클릭 완료", flush=True)
+        time.sleep(2)
+    except Exception as e:
+        print(f"ℹ️ 1차 메뉴 클릭 패스 (이미 서브메뉴가 열려있음): {e}", flush=True)
+
+    # 💡 4-2. '반품관리' 중분류 폴더 클릭
+    try:
+        return_folder = driver.find_element(By.XPATH, "//*[contains(text(), '반품관리')]")
+        driver.execute_script("arguments[0].click();", return_folder)
+        print("👉 중분류 '반품관리' 폴더 클릭 완료", flush=True)
         time.sleep(1)
     except Exception:
         pass
 
-    # 하위 '품질 클레임 관리' 메뉴 클릭
+    # 💡 4-3. 최종 '품질 클레임 관리' 클릭
+    print("👉 '품질 클레임 관리' 클릭...", flush=True)
     claim_menu = driver.find_element(By.XPATH, "//*[contains(text(), '품질 클레임 관리')]")
     driver.execute_script("arguments[0].click();", claim_menu)
     time.sleep(4)
