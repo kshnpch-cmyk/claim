@@ -1,130 +1,79 @@
 import os
+import re
+import glob
+import time
 import json
+import warnings
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
-from playwright.sync_api import sync_playwright
+from datetime import datetime, timedelta, timezone
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 
-# ==========================================
-# 환경 변수 및 설정
-# ==========================================
+# openpyxl CellStyle count 속성 오류 방지 패치
+import openpyxl.styles.cell_style
+_original_cell_style_init = openpyxl.styles.cell_style.CellStyle.__init__
+
+def _patched_cell_style_init(self, *args, **kwargs):
+    kwargs.pop('count', None)
+    _original_cell_style_init(self, *args, **kwargs)
+
+openpyxl.styles.cell_style.CellStyle.__init__ = _patched_cell_style_init
+
+warnings.filterwarnings('ignore')
+
+# 💡 환경 변수 설정
 LOGIN_URL = "https://admin.theborn.co.kr/oms-manager/login"
-CLAIM_PAGE_URL = "https://admin.theborn.co.kr/fms-manager/rtn-approval-manage"
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxFmxSGgRypmiO-bi4Xrs52r-mqWdV-JGHVRU762_txBxR3d3LXn7XDiJo6KbtMbfe1/exec"
 
-COMPANY_CD = os.environ.get("COMPANY_CD")
-USER_ID = os.environ.get("USER_ID")
-USER_PW = os.environ.get("USER_PW")
+OMS_COMPANY_CODE = os.environ.get("COMPANY_CD", "1000").strip()
+OMS_ID = os.environ.get("USER_ID", "").strip()
+OMS_PW = os.environ.get("USER_PW", "").strip()
 
+# 1. KST 실행일 기준 과거 3주간(오늘 포함 21일) 날짜 계산
+KST = timezone(timedelta(hours=9))
+now_kst = datetime.now(KST)
 
-def calculate_dates():
-    """실행일 기준 오늘 포함 과거 3주간(21일)의 날짜 계산"""
-    today = datetime.now()
-    start_date = today - timedelta(days=20)
-    
-    end_dt_str = today.strftime("%Y/%m/%d")
-    start_dt_str = start_date.strftime("%Y/%m/%d")
-    daterange_str = f"{start_dt_str} - {end_dt_str}"
-    
-    return start_dt_str, end_dt_str, daterange_str
+start_date_obj = now_kst - timedelta(days=20)
+end_date_obj = now_kst
 
+target_start_date = start_date_obj.strftime("%Y/%m/%d")
+target_end_date = end_date_obj.strftime("%Y/%m/%d")
+daterange_str = f"{target_start_date} - {target_end_date}"
 
-def download_excel_file():
-    """Chromium 브라우저를 띄워 더본코리아 OMS 로그인 후 엑셀 파일을 다운로드"""
-    output_dir = "./output"
-    os.makedirs(output_dir, exist_ok=True)
-    
-    start_dt, end_dt, daterange = calculate_dates()
-    print(f"[날짜 설정] 조회 기간: {start_dt} ~ {end_dt}")
+# 2. 크롬 브라우저 다운로드 설정 (Headless)
+download_dir = os.getcwd()
+options = webdriver.ChromeOptions()
+options.add_argument('--headless')
+options.add_argument('--no-sandbox')
+options.add_argument('--disable-dev-shm-usage')
+options.add_experimental_option("prefs", {
+    "download.default_directory": download_dir,
+    "download.prompt_for_download": False,
+    "download.directory_upgrade": True,
+    "safebrowsing.enabled": True
+})
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(accept_downloads=True)
-        page = context.new_page()
-
-        print("[1/6] OMS 로그인 페이지 접속...")
-        page.goto(LOGIN_URL)
-        page.wait_for_load_state("networkidle")
-
-        print("[2/6] 로그인 정보 입력...")
-        page.fill('#companyCd', COMPANY_CD)
-        page.fill('#userId', USER_ID)
-        page.fill('#userPw', USER_PW)
-        
-        page.click('#btnLogin')
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(3000)
-
-        print("[3/6] '품질 클레임 관리' 페이지 이동...")
-        page.goto(CLAIM_PAGE_URL)
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(3000)
-
-        print("[4/6] 3주간 날짜 범위 설정 중 (iframe 포함 탐색)...")
-        target_frame = page
-        selector = 'input[name="BOR210_daterange"]'
-        
-        # 메인 페이지에 요소가 없을 경우 iframe들을 탐색
-        if not page.locator(selector).is_visible():
-            for frame in page.frames:
-                try:
-                    if frame.locator(selector).is_visible(timeout=2000):
-                        target_frame = frame
-                        print("👉 iframe 내부에서 날짜 입력창을 발견했습니다!")
-                        break
-                except Exception:
-                    pass
-
-        # 날짜 범위 텍스트 입력 및 hidden 필드 값 주입
-        target_frame.wait_for_selector(selector, timeout=15000)
-        target_frame.fill(selector, daterange)
-        
-        target_frame.evaluate(f'''() => {{
-            const startInput = document.getElementById("BOR210_startDt");
-            const endInput = document.getElementById("BOR210_endDt");
-            if (startInput) startInput.value = "{start_dt}";
-            if (endInput) endInput.value = "{end_dt}";
-        }}''')
-
-        print("[5/6] 우상단 [조회] 버튼 클릭...")
-        target_frame.click('button:has-text("조회"), a:has-text("조회"), input[value="조회"]')
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(2000)
-
-        print("[6/6] 그리드 우클릭 ➔ 엑셀다운로드 팝업 ➔ 다운로드...")
-        target_cell = target_frame.locator('td:has-text("RTN"), th:has-text("반품번호")').first
-        target_cell.click(button="right")
-        page.wait_for_timeout(500)
-
-        target_frame.click('text="엑셀다운로드"')
-        page.wait_for_timeout(1000)
-
-        filename_input = target_frame.locator('input[placeholder="파일명"]').first
-        filename_input.fill('claim_data')
-
-        with page.expect_download() as download_info:
-            target_frame.click('button:has-text("다운로드")')
-            
-        download = download_info.value
-        file_path = os.path.join(output_dir, download.suggested_filename)
-        download.save_as(file_path)
-        
-        print(f"🎉 엑셀 다운로드 완료: {file_path}")
-        browser.close()
-        
-        return file_path
+driver = webdriver.Chrome(options=options)
+driver.set_window_size(1920, 1080)
+driver.command_executor._commands["send_command"] = ("POST", '/session/$sessionId/chromium/send_command')
+params = {'cmd': 'Page.setDownloadBehavior', 'params': {'behavior': 'allow', 'downloadPath': download_dir}}
+driver.execute_script("return null;")
+driver.execute("send_command", params)
 
 
 def send_data_to_google_sheet(excel_file_path):
     """다운로드한 엑셀 파일의 데이터를 읽어 Google Apps Script 웹앱으로 전송"""
     if not excel_file_path or not os.path.exists(excel_file_path):
-        print("전송할 엑셀 파일이 존재하지 않습니다.")
+        print("⚠️ 전송할 엑셀 파일이 존재하지 않습니다.", flush=True)
         return
 
-    print("🚀 Google Apps Script 웹앱으로 데이터 전송 시작...")
+    print("🚀 Google Apps Script 웹앱으로 데이터 전송 시작...", flush=True)
 
     try:
-        df = pd.read_excel(excel_file_path)
+        df = pd.read_excel(excel_file_path, engine='openpyxl')
     except Exception:
         df = pd.read_csv(excel_file_path)
 
@@ -132,7 +81,7 @@ def send_data_to_google_sheet(excel_file_path):
     rows_data = df.values.tolist()
 
     if not rows_data:
-        print("엑셀 파일 내 데이터가 없습니다.")
+        print("⚠️ 엑셀 파일 내 데이터가 없습니다.", flush=True)
         return
 
     try:
@@ -144,24 +93,108 @@ def send_data_to_google_sheet(excel_file_path):
         
         res_json = response.json()
         if res_json.get("result") == "success":
-            print(f"✅ 구글 시트 업로드 성공! (신규 추가: {res_json.get('added')}건)")
+            print(f"✅ 구글 시트 업로드 성공! (신규 추가: {res_json.get('added')}건)", flush=True)
         else:
-            print(f"❌ Apps Script 오류: {res_json.get('error')}")
+            print(f"❌ Apps Script 오류: {res_json.get('error')}", flush=True)
 
     except Exception as e:
-        print(f"❌ HTTP 요청 실패: {e}")
+        print(f"❌ HTTP 요청 실패: {e}", flush=True)
 
 
-if __name__ == "__main__":
-    print("=== 자동화 스크립트 실행 시작 ===")
-    
-    if not COMPANY_CD or not USER_ID or not USER_PW:
-        print("❌ 오류: GitHub Secrets (COMPANY_CD, USER_ID, USER_PW) 환경변수가 설정되지 않았습니다.")
-    else:
-        try:
-            downloaded_path = download_excel_file()
-            send_data_to_google_sheet(downloaded_path)
-        except Exception as e:
-            print(f"❌ 실행 중 오류 발생: {e}")
-            
-    print("=== 자동화 스크립트 실행 종료 ===")
+try:
+    print(f"[{now_kst.strftime('%Y-%m-%d %H:%M:%S')}] 품질 클레임 관리 자동 수집 시작", flush=True)
+    print(f"조회 지정 기간 (과거 3주): {target_start_date} ~ {target_end_date}", flush=True)
+
+    # 3. 어드민 로그인
+    print("[1/6] OMS 로그인 진행 중...", flush=True)
+    driver.get(LOGIN_URL)
+    time.sleep(2)
+    driver.find_element(By.ID, 'companyCd').send_keys(OMS_COMPANY_CODE)
+    driver.find_element(By.ID, 'userId').send_keys(OMS_ID)
+    driver.find_element(By.ID, 'userPw').send_keys(OMS_PW + Keys.ENTER)
+    time.sleep(4)
+
+    # 4. 품질 클레임 관리 메뉴 직접 이동
+    print("[2/6] '품질 클레임 관리' 페이지 이동...", flush=True)
+    driver.get("https://admin.theborn.co.kr/fms-manager/rtn-approval-manage")
+    time.sleep(4)
+
+    # 5. 날짜 세팅 (BOR210) 및 F2/버튼 조회
+    print("[3/6] 3주간 날짜 범위 설정 중...", flush=True)
+    js_script = f"""
+        var rangeInput = document.getElementsByName('BOR210_daterange')[0];
+        if(rangeInput) {{
+            rangeInput.value = '{daterange_str}';
+            rangeInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        }}
+        var startInput = document.getElementById('BOR210_startDt');
+        var endInput = document.getElementById('BOR210_endDt');
+        if(startInput) startInput.value = '{target_start_date}';
+        if(endInput) endInput.value = '{target_end_date}';
+    """
+    driver.execute_script(js_script)
+    time.sleep(2)
+
+    print("[4/6] [조회] 실행...", flush=True)
+    try:
+        driver.find_element(By.CSS_SELECTOR, "button.form_btn_search[data-shortcut='F2']").click()
+    except Exception:
+        driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.F2)
+    time.sleep(6)
+
+    # 6. 컬럼 헤더/셀 우클릭
+    print("[5/6] 그리드 영역 우클릭 메뉴 호출...", flush=True)
+    header_element = driver.find_element(By.CSS_SELECTOR, 'thead th') or driver.find_element(By.TAG_NAME, 'th')
+    try:
+        ActionChains(driver).context_click(header_element).perform()
+    except Exception:
+        pass
+    time.sleep(1.5)
+
+    # 7. '엑셀다운로드' 메뉴 클릭 & SweetAlert 팝업 파일명 입력
+    print("[6/6] 엑셀다운로드 실행 중...", flush=True)
+    excel_btn = driver.find_element(By.XPATH, "//*[contains(text(), '엑셀다운로드')]")
+    driver.execute_script("arguments[0].click();", excel_btn)
+    time.sleep(2)
+
+    try:
+        swal_input = driver.find_element(By.CSS_SELECTOR, "input.swal2-input")
+        swal_input.clear()
+        swal_input.send_keys("claim_download")
+    except Exception:
+        pass
+    time.sleep(1)
+
+    download_btn = driver.find_element(By.CSS_SELECTOR, "button.swal2-confirm")
+    driver.execute_script("arguments[0].click();", download_btn)
+    time.sleep(5)
+
+    try:
+        ok_btn = driver.find_element(By.CSS_SELECTOR, "button.swal2-confirm")
+        driver.execute_script("arguments[0].click();", ok_btn)
+    except Exception:
+        pass
+    time.sleep(5)
+
+    # 8. 다운로드받은 엑셀 파일 수신 및 구글 시트 웹앱으로 전송
+    list_of_files = glob.glob(os.path.join(download_dir, '*.xlsx')) or glob.glob(os.path.join(download_dir, '*.xls'))
+    if not list_of_files:
+        raise Exception("다운로드 파일 수신 실패")
+
+    latest_file = max(list_of_files, key=os.path.getctime)
+    print(f"📥 수신된 파일: {latest_file}", flush=True)
+
+    send_data_to_google_sheet(latest_file)
+
+    # 임시 다운로드 파일 정리
+    if os.path.exists(latest_file):
+        os.remove(latest_file)
+
+except Exception as e:
+    print(f"❌ 오류 발생: {e}", flush=True)
+    try:
+        driver.save_screenshot("claim_result.png")
+    except Exception:
+        pass
+finally:
+    driver.quit()
