@@ -9,6 +9,7 @@ from playwright.sync_api import sync_playwright
 # 환경 변수 및 설정
 # ==========================================
 LOGIN_URL = "https://admin.theborn.co.kr/oms-manager/login"
+CLAIM_PAGE_URL = "https://admin.theborn.co.kr/fms-manager/rtn-approval-manage"
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxFmxSGgRypmiO-bi4Xrs52r-mqWdV-JGHVRU762_txBxR3d3LXn7XDiJo6KbtMbfe1/exec"
 
 COMPANY_CD = os.environ.get("COMPANY_CD")
@@ -17,8 +18,9 @@ USER_PW = os.environ.get("USER_PW")
 
 
 def calculate_dates():
+    """실행일 기준 오늘 포함 과거 3주간(21일)의 날짜 계산"""
     today = datetime.now()
-    start_date = today - timedelta(days=20)  # 오늘 포함 3주(21일)
+    start_date = today - timedelta(days=20)
     
     end_dt_str = today.strftime("%Y/%m/%d")
     start_dt_str = start_date.strftime("%Y/%m/%d")
@@ -28,6 +30,7 @@ def calculate_dates():
 
 
 def download_excel_file():
+    """Chromium 브라우저를 띄워 더본코리아 OMS 로그인 후 엑셀 파일을 다운로드"""
     output_dir = "./output"
     os.makedirs(output_dir, exist_ok=True)
     
@@ -53,39 +56,54 @@ def download_excel_file():
         page.wait_for_timeout(3000)
 
         print("[3/6] '품질 클레임 관리' 페이지 이동...")
-        page.goto("https://admin.theborn.co.kr/fms-manager/rtn-approval-manage")
+        page.goto(CLAIM_PAGE_URL)
         page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(3000)
 
-        print("[4/6] 3주간 날짜 범위 설정...")
-        page.wait_for_selector('input[name="BOR210_daterange"]', timeout=10000)
-        page.fill('input[name="BOR210_daterange"]', daterange)
+        print("[4/6] 3주간 날짜 범위 설정 중 (iframe 포함 탐색)...")
+        target_frame = page
+        selector = 'input[name="BOR210_daterange"]'
         
-        page.evaluate(f'''() => {{
+        # 메인 페이지에 요소가 없을 경우 iframe들을 탐색
+        if not page.locator(selector).is_visible():
+            for frame in page.frames:
+                try:
+                    if frame.locator(selector).is_visible(timeout=2000):
+                        target_frame = frame
+                        print("👉 iframe 내부에서 날짜 입력창을 발견했습니다!")
+                        break
+                except Exception:
+                    pass
+
+        # 날짜 범위 텍스트 입력 및 hidden 필드 값 주입
+        target_frame.wait_for_selector(selector, timeout=15000)
+        target_frame.fill(selector, daterange)
+        
+        target_frame.evaluate(f'''() => {{
             const startInput = document.getElementById("BOR210_startDt");
             const endInput = document.getElementById("BOR210_endDt");
             if (startInput) startInput.value = "{start_dt}";
             if (endInput) endInput.value = "{end_dt}";
         }}''')
 
-        print("[5/6] [조회] 버튼 클릭...")
-        page.click('button:has-text("조회"), a:has-text("조회"), input[value="조회"]')
+        print("[5/6] 우상단 [조회] 버튼 클릭...")
+        target_frame.click('button:has-text("조회"), a:has-text("조회"), input[value="조회"]')
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(2000)
 
         print("[6/6] 그리드 우클릭 ➔ 엑셀다운로드 팝업 ➔ 다운로드...")
-        target_cell = page.locator('td:has-text("RTN"), th:has-text("반품번호")').first
+        target_cell = target_frame.locator('td:has-text("RTN"), th:has-text("반품번호")').first
         target_cell.click(button="right")
         page.wait_for_timeout(500)
 
-        page.click('text="엑셀다운로드"')
+        target_frame.click('text="엑셀다운로드"')
         page.wait_for_timeout(1000)
 
-        filename_input = page.locator('input[placeholder="파일명"]').first
+        filename_input = target_frame.locator('input[placeholder="파일명"]').first
         filename_input.fill('claim_data')
 
         with page.expect_download() as download_info:
-            page.click('button:has-text("다운로드")')
+            target_frame.click('button:has-text("다운로드")')
             
         download = download_info.value
         file_path = os.path.join(output_dir, download.suggested_filename)
@@ -98,6 +116,7 @@ def download_excel_file():
 
 
 def send_data_to_google_sheet(excel_file_path):
+    """다운로드한 엑셀 파일의 데이터를 읽어 Google Apps Script 웹앱으로 전송"""
     if not excel_file_path or not os.path.exists(excel_file_path):
         print("전송할 엑셀 파일이 존재하지 않습니다.")
         return
@@ -136,7 +155,6 @@ def send_data_to_google_sheet(excel_file_path):
 if __name__ == "__main__":
     print("=== 자동화 스크립트 실행 시작 ===")
     
-    # Secrets 환경변수 체크
     if not COMPANY_CD or not USER_ID or not USER_PW:
         print("❌ 오류: GitHub Secrets (COMPANY_CD, USER_ID, USER_PW) 환경변수가 설정되지 않았습니다.")
     else:
