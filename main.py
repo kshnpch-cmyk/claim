@@ -1,3 +1,32 @@
+import os
+import json
+import requests
+import pandas as pd
+from datetime import datetime, timedelta
+from playwright.sync_api import sync_playwright
+
+# ==========================================
+# 환경 변수 및 설정
+# ==========================================
+LOGIN_URL = "https://admin.theborn.co.kr/oms-manager/login"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxFmxSGgRypmiO-bi4Xrs52r-mqWdV-JGHVRU762_txBxR3d3LXn7XDiJo6KbtMbfe1/exec"
+
+COMPANY_CD = os.environ.get("COMPANY_CD")
+USER_ID = os.environ.get("USER_ID")
+USER_PW = os.environ.get("USER_PW")
+
+
+def calculate_dates():
+    today = datetime.now()
+    start_date = today - timedelta(days=20)  # 오늘 포함 3주(21일)
+    
+    end_dt_str = today.strftime("%Y/%m/%d")
+    start_dt_str = start_date.strftime("%Y/%m/%d")
+    daterange_str = f"{start_dt_str} - {end_dt_str}"
+    
+    return start_dt_str, end_dt_str, daterange_str
+
+
 def download_excel_file():
     output_dir = "./output"
     os.makedirs(output_dir, exist_ok=True)
@@ -21,16 +50,14 @@ def download_excel_file():
         
         page.click('#btnLogin')
         page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(3000) # 로그인 후 리다이렉트 완전 대기
+        page.wait_for_timeout(3000)
 
-        print("[3/6] '품질 클레임 관리' 페이지로 직접 이동...")
-        # 💡 [핵심 수정] 메뉴 클릭 대신 URL 직접 접속으로 Timeout 에러 원천 차단
+        print("[3/6] '품질 클레임 관리' 페이지 이동...")
         page.goto("https://admin.theborn.co.kr/fms-manager/rtn-approval-manage")
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(2000)
 
         print("[4/6] 3주간 날짜 범위 설정...")
-        # daterange input 존재 여부 확인 및 입력
         page.wait_for_selector('input[name="BOR210_daterange"]', timeout=10000)
         page.fill('input[name="BOR210_daterange"]', daterange)
         
@@ -68,3 +95,55 @@ def download_excel_file():
         browser.close()
         
         return file_path
+
+
+def send_data_to_google_sheet(excel_file_path):
+    if not excel_file_path or not os.path.exists(excel_file_path):
+        print("전송할 엑셀 파일이 존재하지 않습니다.")
+        return
+
+    print("🚀 Google Apps Script 웹앱으로 데이터 전송 시작...")
+
+    try:
+        df = pd.read_excel(excel_file_path)
+    except Exception:
+        df = pd.read_csv(excel_file_path)
+
+    df = df.fillna("")
+    rows_data = df.values.tolist()
+
+    if not rows_data:
+        print("엑셀 파일 내 데이터가 없습니다.")
+        return
+
+    try:
+        response = requests.post(
+            WEBAPP_URL,
+            data=json.dumps(rows_data),
+            headers={"Content-Type": "application/json"}
+        )
+        
+        res_json = response.json()
+        if res_json.get("result") == "success":
+            print(f"✅ 구글 시트 업로드 성공! (신규 추가: {res_json.get('added')}건)")
+        else:
+            print(f"❌ Apps Script 오류: {res_json.get('error')}")
+
+    except Exception as e:
+        print(f"❌ HTTP 요청 실패: {e}")
+
+
+if __name__ == "__main__":
+    print("=== 자동화 스크립트 실행 시작 ===")
+    
+    # Secrets 환경변수 체크
+    if not COMPANY_CD or not USER_ID or not USER_PW:
+        print("❌ 오류: GitHub Secrets (COMPANY_CD, USER_ID, USER_PW) 환경변수가 설정되지 않았습니다.")
+    else:
+        try:
+            downloaded_path = download_excel_file()
+            send_data_to_google_sheet(downloaded_path)
+        except Exception as e:
+            print(f"❌ 실행 중 오류 발생: {e}")
+            
+    print("=== 자동화 스크립트 실행 종료 ===")
