@@ -26,7 +26,7 @@ warnings.filterwarnings('ignore')
 
 # 💡 최신 배포 웹앱 URL 지정
 LOGIN_URL = "https://admin.theborn.co.kr/oms-manager/login"
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyRN8rfdpqIE5yO2r-cfZF2vAQ3YXwVx6bB8oHDcGaizngSaZXVNbiUxqAl1CjRLrf5/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyub__1ms7jkdDisirHn0ltvZFpODudPRNk_hsQxOdqa9eugJ9ocPO0B8IdfjRT4Lq6/exec"
 
 OMS_COMPANY_CODE = os.environ.get("COMPANY_CD", "1000").strip()
 OMS_ID = os.environ.get("USER_ID", "").strip()
