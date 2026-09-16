@@ -32,6 +32,10 @@ OMS_COMPANY_CODE = os.environ.get("COMPANY_CD", "1000").strip()
 OMS_ID = os.environ.get("USER_ID", "").strip()
 OMS_PW = os.environ.get("USER_PW", "").strip()
 
+# 결과 저장용 폴더 생성
+output_dir = "./output"
+os.makedirs(output_dir, exist_ok=True)
+
 # 1. KST 실행일 기준 과거 3주간(오늘 포함 21일) 날짜 계산
 KST = timezone(timedelta(hours=9))
 now_kst = datetime.now(KST)
@@ -65,7 +69,6 @@ driver.execute("send_command", params)
 
 
 def send_data_to_google_sheet(excel_file_path):
-    """다운로드한 엑셀 파일의 데이터를 읽어 Google Apps Script 웹앱으로 전송"""
     if not excel_file_path or not os.path.exists(excel_file_path):
         print("⚠️ 전송할 엑셀 파일이 존재하지 않습니다.", flush=True)
         return
@@ -119,7 +122,16 @@ try:
     driver.get("https://admin.theborn.co.kr/fms-manager/rtn-approval-manage")
     time.sleep(4)
 
-    # 5. 날짜 세팅 (BOR210) 및 F2/버튼 조회
+    # 📸 로그인 및 이동 후 화면 캡처
+    driver.save_screenshot(os.path.join(output_dir, "step2_page_loaded.png"))
+
+    # 5. iframe 여부 체크 및 Switch
+    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+    if iframes:
+        print(f"👉 {len(iframes)}개의 iframe이 감지되었습니다. 첫 번째 iframe으로 전환합니다.", flush=True)
+        driver.switch_to.frame(0)
+
+    # 6. 날짜 세팅 (BOR210) 및 F2/버튼 조회
     print("[3/6] 3주간 날짜 범위 설정 중...", flush=True)
     js_script = f"""
         var rangeInput = document.getElementsByName('BOR210_daterange')[0];
@@ -142,16 +154,31 @@ try:
         driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.F2)
     time.sleep(6)
 
-    # 6. 컬럼 헤더/셀 우클릭
+    # 📸 조회 버튼 누른 후 화면 캡처
+    driver.save_screenshot(os.path.join(output_dir, "step4_search_clicked.png"))
+
+    # 7. 컬럼 헤더/셀 우클릭 (다양한 요소를 안전하게 탐색)
     print("[5/6] 그리드 영역 우클릭 메뉴 호출...", flush=True)
-    header_element = driver.find_element(By.CSS_SELECTOR, 'thead th') or driver.find_element(By.TAG_NAME, 'th')
-    try:
-        ActionChains(driver).context_click(header_element).perform()
-    except Exception:
-        pass
+    
+    header_element = None
+    selectors = ['thead th', 'th', 'td', 'div.realgrid', 'table']
+    for sel in selectors:
+        elements = driver.find_elements(By.CSS_SELECTOR, sel)
+        if elements:
+            header_element = elements[0]
+            print(f"👉 우클릭 타겟 요소 발견: Selector('{sel}')", flush=True)
+            break
+
+    if not header_element:
+        raise Exception("그리드 우클릭 대상 요소(테이블/셀)를 화면에서 찾을 수 없습니다.")
+
+    ActionChains(driver).context_click(header_element).perform()
     time.sleep(1.5)
 
-    # 7. '엑셀다운로드' 메뉴 클릭 & SweetAlert 팝업 파일명 입력
+    # 📸 우클릭 후 화면 캡처
+    driver.save_screenshot(os.path.join(output_dir, "step5_context_menu.png"))
+
+    # 8. '엑셀다운로드' 메뉴 클릭 & SweetAlert 팝업 파일명 입력
     print("[6/6] 엑셀다운로드 실행 중...", flush=True)
     excel_btn = driver.find_element(By.XPATH, "//*[contains(text(), '엑셀다운로드')]")
     driver.execute_script("arguments[0].click();", excel_btn)
@@ -176,7 +203,7 @@ try:
         pass
     time.sleep(5)
 
-    # 8. 다운로드받은 엑셀 파일 수신 및 구글 시트 웹앱으로 전송
+    # 9. 다운로드받은 엑셀 파일 수신 및 구글 시트 웹앱으로 전송
     list_of_files = glob.glob(os.path.join(download_dir, '*.xlsx')) or glob.glob(os.path.join(download_dir, '*.xls'))
     if not list_of_files:
         raise Exception("다운로드 파일 수신 실패")
@@ -186,14 +213,15 @@ try:
 
     send_data_to_google_sheet(latest_file)
 
-    # 임시 다운로드 파일 정리
     if os.path.exists(latest_file):
         os.remove(latest_file)
 
 except Exception as e:
     print(f"❌ 오류 발생: {e}", flush=True)
+    # 📸 에러 발생 시 최후의 화면 캡처
     try:
-        driver.save_screenshot("claim_result.png")
+        driver.save_screenshot(os.path.join(output_dir, "error_screenshot.png"))
+        print(f"📸 에러 화면 캡처 저장 완료: {os.path.join(output_dir, 'error_screenshot.png')}", flush=True)
     except Exception:
         pass
 finally:
