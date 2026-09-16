@@ -32,11 +32,10 @@ OMS_COMPANY_CODE = os.environ.get("COMPANY_CD", "1000").strip()
 OMS_ID = os.environ.get("USER_ID", "").strip()
 OMS_PW = os.environ.get("USER_PW", "").strip()
 
-# 결과 저장용 폴더 생성
 output_dir = "./output"
 os.makedirs(output_dir, exist_ok=True)
 
-# 1. KST 실행일 기준 과거 3주간(오늘 포함 21일) 날짜 계산
+# 1. KST 날짜 계산 (과거 3주간)
 KST = timezone(timedelta(hours=9))
 now_kst = datetime.now(KST)
 
@@ -108,7 +107,7 @@ try:
     print(f"[{now_kst.strftime('%Y-%m-%d %H:%M:%S')}] 품질 클레임 관리 자동 수집 시작", flush=True)
     print(f"조회 지정 기간 (과거 3주): {target_start_date} ~ {target_end_date}", flush=True)
 
-    # 3. 어드민 로그인
+    # 3. 로그인 진행
     print("[1/6] OMS 로그인 진행 중...", flush=True)
     driver.get(LOGIN_URL)
     time.sleep(2)
@@ -117,21 +116,31 @@ try:
     driver.find_element(By.ID, 'userPw').send_keys(OMS_PW + Keys.ENTER)
     time.sleep(4)
 
-    # 4. 품질 클레임 관리 메뉴 직접 이동
-    print("[2/6] '품질 클레임 관리' 페이지 이동...", flush=True)
-    driver.get("https://admin.theborn.co.kr/fms-manager/rtn-approval-manage")
+    # 4. 메뉴 클릭 이동 (Direct URL 이동 시 404 방지)
+    print("[2/6] 메뉴 클릭을 통해 '품질 클레임 관리'로 이동 중...", flush=True)
+    
+    # 상위 메뉴 펼치기 시도 ('반품관리' 메뉴 클릭)
+    try:
+        return_menu = driver.find_element(By.XPATH, "//*[contains(text(), '반품관리')]")
+        driver.execute_script("arguments[0].click();", return_menu)
+        time.sleep(1)
+    except Exception:
+        pass
+
+    # 하위 '품질 클레임 관리' 메뉴 클릭
+    claim_menu = driver.find_element(By.XPATH, "//*[contains(text(), '품질 클레임 관리')]")
+    driver.execute_script("arguments[0].click();", claim_menu)
     time.sleep(4)
 
-    # 📸 로그인 및 이동 후 화면 캡처
     driver.save_screenshot(os.path.join(output_dir, "step2_page_loaded.png"))
 
-    # 5. iframe 여부 체크 및 Switch
+    # 5. iframe 전환 체크
     iframes = driver.find_elements(By.TAG_NAME, "iframe")
     if iframes:
-        print(f"👉 {len(iframes)}개의 iframe이 감지되었습니다. 첫 번째 iframe으로 전환합니다.", flush=True)
+        print(f"👉 {len(iframes)}개의 iframe 감지됨. iframe으로 전환합니다.", flush=True)
         driver.switch_to.frame(0)
 
-    # 6. 날짜 세팅 (BOR210) 및 F2/버튼 조회
+    # 6. 날짜 범위 입력 (BOR210)
     print("[3/6] 3주간 날짜 범위 설정 중...", flush=True)
     js_script = f"""
         var rangeInput = document.getElementsByName('BOR210_daterange')[0];
@@ -147,6 +156,7 @@ try:
     driver.execute_script(js_script)
     time.sleep(2)
 
+    # 7. [조회] 실행 (F2 키 또는 버튼)
     print("[4/6] [조회] 실행...", flush=True)
     try:
         driver.find_element(By.CSS_SELECTOR, "button.form_btn_search[data-shortcut='F2']").click()
@@ -154,19 +164,17 @@ try:
         driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.F2)
     time.sleep(6)
 
-    # 📸 조회 버튼 누른 후 화면 캡처
     driver.save_screenshot(os.path.join(output_dir, "step4_search_clicked.png"))
 
-    # 7. 컬럼 헤더/셀 우클릭 (다양한 요소를 안전하게 탐색)
+    # 8. 우클릭 대상 탐색 및 우클릭
     print("[5/6] 그리드 영역 우클릭 메뉴 호출...", flush=True)
-    
     header_element = None
-    selectors = ['thead th', 'th', 'td', 'div.realgrid', 'table']
+    selectors = ['td', 'th', 'thead th', 'div.realgrid', 'table']
     for sel in selectors:
         elements = driver.find_elements(By.CSS_SELECTOR, sel)
         if elements:
             header_element = elements[0]
-            print(f"👉 우클릭 타겟 요소 발견: Selector('{sel}')", flush=True)
+            print(f"👉 우클릭 타겟 발견: Selector('{sel}')", flush=True)
             break
 
     if not header_element:
@@ -175,10 +183,9 @@ try:
     ActionChains(driver).context_click(header_element).perform()
     time.sleep(1.5)
 
-    # 📸 우클릭 후 화면 캡처
     driver.save_screenshot(os.path.join(output_dir, "step5_context_menu.png"))
 
-    # 8. '엑셀다운로드' 메뉴 클릭 & SweetAlert 팝업 파일명 입력
+    # 9. '엑셀다운로드' 클릭 및 SweetAlert 팝업 제어
     print("[6/6] 엑셀다운로드 실행 중...", flush=True)
     excel_btn = driver.find_element(By.XPATH, "//*[contains(text(), '엑셀다운로드')]")
     driver.execute_script("arguments[0].click();", excel_btn)
@@ -203,7 +210,7 @@ try:
         pass
     time.sleep(5)
 
-    # 9. 다운로드받은 엑셀 파일 수신 및 구글 시트 웹앱으로 전송
+    # 10. 파일 수신 및 데이터 전송
     list_of_files = glob.glob(os.path.join(download_dir, '*.xlsx')) or glob.glob(os.path.join(download_dir, '*.xls'))
     if not list_of_files:
         raise Exception("다운로드 파일 수신 실패")
@@ -218,10 +225,9 @@ try:
 
 except Exception as e:
     print(f"❌ 오류 발생: {e}", flush=True)
-    # 📸 에러 발생 시 최후의 화면 캡처
     try:
         driver.save_screenshot(os.path.join(output_dir, "error_screenshot.png"))
-        print(f"📸 에러 화면 캡처 저장 완료: {os.path.join(output_dir, 'error_screenshot.png')}", flush=True)
+        print(f"📸 에러 화면 캡처 완료: {os.path.join(output_dir, 'error_screenshot.png')}", flush=True)
     except Exception:
         pass
 finally:
