@@ -9,38 +9,32 @@ USER_ID = os.environ.get("USER_ID")
 USER_PW = os.environ.get("USER_PW")
 
 def calculate_dates():
-    # 오늘 날짜 (종료일)
     today = datetime.now()
-    # 3주 전 날짜 (시작일: 오늘 포함 21일 전)
-    start_date = today - timedelta(days=20)
+    start_date = today - timedelta(days=20) # 오늘 포함 3주(21일)
     
-    # YYYY/MM/DD 포맷팅
     end_dt_str = today.strftime("%Y/%m/%d")
     start_dt_str = start_date.strftime("%Y/%m/%d")
-    
-    # daterange 표시용 포맷 (예: 2026/08/27 - 2026/09/16)
     daterange_str = f"{start_dt_str} - {end_dt_str}"
     
     return start_dt_str, end_dt_str, daterange_str
 
-def test_login_and_download():
+def run_automation():
     output_dir = "./output"
     os.makedirs(output_dir, exist_ok=True)
     
-    # 3주간의 날짜 범위 계산
     start_dt, end_dt, daterange = calculate_dates()
-    print(f"[날짜 설정] 조회 기간: {start_dt} ~ {end_dt} ({daterange})")
+    print(f"[날짜 설정] 조회 기간: {start_dt} ~ {end_dt}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
 
-        print("[1/5] 로그인 페이지 접속 중...")
+        print("[1/6] 로그인 페이지 접속 중...")
         page.goto(LOGIN_URL)
         page.wait_for_load_state("networkidle")
 
-        print("[2/5] 로그인 정보 입력 중...")
+        print("[2/6] 로그인 정보 입력 중...")
         page.fill('#companyCd', COMPANY_CD)
         page.fill('#userId', USER_ID)
         page.fill('#userPw', USER_PW)
@@ -49,16 +43,14 @@ def test_login_and_download():
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(2000)
 
-        print("[3/5] '품질 클레임 관리' 메뉴 이동...")
+        print("[3/6] '품질 클레임 관리' 메뉴 이동...")
         page.click('#side-menu-BOR210')
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(2000)
 
-        print("[4/5] 3주간 조회 기간 설정 입력 중...")
-        # 1. daterange input 채우기
+        print("[4/6] 3주간 날짜 범위 설정 중...")
         page.fill('input[name="BOR210_daterange"]', daterange)
         
-        # 2. hidden input 값 강제 변경 (JavaScript 바인딩 처리)
         page.evaluate(f'''() => {{
             const startInput = document.getElementById("BOR210_startDt");
             const endInput = document.getElementById("BOR210_endDt");
@@ -66,16 +58,42 @@ def test_login_and_download():
             if (endInput) endInput.value = "{end_dt}";
         }}''')
 
-        # 📸 [확인용] 날짜 설정 반영 및 페이지 화면 캡처
-        screenshot_path = os.path.join(output_dir, "claim_date_set_result.png")
-        page.screenshot(path=screenshot_path, full_page=True)
-        print(f"날짜 적용 화면 캡처 완료: {screenshot_path}")
+        print("[5/6] 우상단 [조회] 버튼 클릭...")
+        page.click('button:has-text("조회"), a:has-text("조회"), input[value="조회"]')
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(2000)
 
-        print("[5/5] 조회 버튼 클릭 및 엑셀 다운로드 시도 대기...")
-        # ⚠️ 조회 버튼 클릭이나 엑셀 다운로드 버튼 element를 확인하여 아래에 추가하면 됩니다.
-        # page.click('#btnSearch') # 예시 조회버튼
+        print("[6/6] 그리드 우클릭 ➔ 팝업창 파일명 입력 ➔ 다운로드 실행 중...")
+        
+        # 1. 셀 우클릭
+        target_cell = page.locator('td:has-text("RTN"), th:has-text("반품번호")').first
+        target_cell.click(button="right")
+        page.wait_for_timeout(500)
+
+        # 2. 컨텍스트 메뉴의 '엑셀다운로드' 클릭 (팝업이 뜸)
+        page.click('text="엑셀다운로드"')
+        page.wait_for_timeout(1000)
+
+        # 3. 팝업창 폼 제어 (placeholder="파일명" 또는 type="text" 입력창 찾기)
+        filename_input = page.locator('input[placeholder="파일명"]').first
+        filename_input.fill('claim_data')
+
+        # 📸 [확인용] 팝업창에 파일명이 잘 채워졌는지 캡처
+        popup_screenshot = os.path.join(output_dir, "popup_filled_result.png")
+        page.screenshot(path=popup_screenshot, full_page=True)
+        print(f"팝업 입력 캡처 완료: {popup_screenshot}")
+
+        # 4. 팝업창 내 [다운로드] 버튼 클릭 및 파일 수신
+        with page.expect_download() as download_info:
+            page.click('button:has-text("다운로드")')
+            
+        download = download_info.value
+        file_path = os.path.join(output_dir, download.suggested_filename)
+        download.save_as(file_path)
+        
+        print(f"🎉 엑셀 파일 다운로드 성공: {file_path}")
 
         browser.close()
 
 if __name__ == "__main__":
-    test_login_and_download()
+    run_automation()
