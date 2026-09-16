@@ -1,12 +1,22 @@
 import os
+import json
+import pandas as pd
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
+import gspread
+from google.oauth2.service_account import Credentials
 
+# ==========================================
+# 환경 변수 및 상수 설정
+# ==========================================
 LOGIN_URL = "https://admin.theborn.co.kr/oms-manager/login"
+SPREADSHEET_KEY = "16lfX5WG4cPnRLZe2k8quGLWA_oF1xpI79ppAE4VMzGk" # 제공해주신 시트 Key
 
 COMPANY_CD = os.environ.get("COMPANY_CD")
 USER_ID = os.environ.get("USER_ID")
 USER_PW = os.environ.get("USER_PW")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+
 
 def calculate_dates():
     today = datetime.now()
@@ -18,7 +28,8 @@ def calculate_dates():
     
     return start_dt_str, end_dt_str, daterange_str
 
-def run_automation():
+
+def download_excel_file():
     output_dir = "./output"
     os.makedirs(output_dir, exist_ok=True)
     
@@ -63,27 +74,17 @@ def run_automation():
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(2000)
 
-        print("[6/6] 그리드 우클릭 ➔ 팝업창 파일명 입력 ➔ 다운로드 실행 중...")
-        
-        # 1. 셀 우클릭
+        print("[6/6] 그리드 우클릭 ➔ 팝업창 파일명 입력 ➔ 다운로드...")
         target_cell = page.locator('td:has-text("RTN"), th:has-text("반품번호")').first
         target_cell.click(button="right")
         page.wait_for_timeout(500)
 
-        # 2. 컨텍스트 메뉴의 '엑셀다운로드' 클릭 (팝업이 뜸)
         page.click('text="엑셀다운로드"')
         page.wait_for_timeout(1000)
 
-        # 3. 팝업창 폼 제어 (placeholder="파일명" 또는 type="text" 입력창 찾기)
         filename_input = page.locator('input[placeholder="파일명"]').first
         filename_input.fill('claim_data')
 
-        # 📸 [확인용] 팝업창에 파일명이 잘 채워졌는지 캡처
-        popup_screenshot = os.path.join(output_dir, "popup_filled_result.png")
-        page.screenshot(path=popup_screenshot, full_page=True)
-        print(f"팝업 입력 캡처 완료: {popup_screenshot}")
-
-        # 4. 팝업창 내 [다운로드] 버튼 클릭 및 파일 수신
         with page.expect_download() as download_info:
             page.click('button:has-text("다운로드")')
             
@@ -91,9 +92,66 @@ def run_automation():
         file_path = os.path.join(output_dir, download.suggested_filename)
         download.save_as(file_path)
         
-        print(f"🎉 엑셀 파일 다운로드 성공: {file_path}")
-
+        print(f"🎉 엑셀 다운로드 완료: {file_path}")
         browser.close()
+        
+        return file_path
+
+
+def update_google_sheet(excel_file_path):
+    if not excel_file_path or not os.path.exists(excel_file_path):
+        print("업데이트할 엑셀 파일이 존재하지 않습니다.")
+        return
+
+    print("📊 [구글 시트] 데이터 변환 및 업로드 시작...")
+
+    # 1. 다운로드받은 엑셀 파일 읽기
+    try:
+        df = pd.read_excel(excel_file_path)
+    except Exception:
+        df = pd.read_csv(excel_file_path)
+
+    # 데이터 내 빈값(NaN)을 빈 문자열("")로 대체
+    df = df.fillna("")
+
+    # 2. Google Sheets API 인증 연결
+    sa_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    credentials = Credentials.from_service_account_info(sa_info, scopes=scopes)
+    gc = gspread.authorize(credentials)
+
+    # 지정하신 시트의 첫 번째 워크시트(gid=0) 열기
+    sheet = gc.open_by_key(SPREADSHEET_KEY).sheet1
+
+    # 3. 중복 저장 방지 (기존 시트 1열에 존재하는 반품번호/클레임ID 가져오기)
+    existing_ids = set(sheet.col_values(1)[1:])
+
+    # 4. 업로드할 행 추출 (중복 제외)
+    rows_to_append = []
+    headers = list(df.columns)
+
+    # 시트가 아예 비어있는 경우 헤더(컬럼명)를 먼저 집어넣음
+    if len(sheet.get_all_values()) == 0:
+        sheet.append_row(headers)
+
+    for record in df.to_dict(orient="records"):
+        # 엑셀의 첫 번째 컬럼 값을 고유 식별키로 사용
+        first_col_val = str(record[headers[0]])
+        
+        if first_col_val and first_col_val not in existing_ids:
+            # 엑셀 행 전체 값을 리스트 형태로 추출
+            row_data = [str(record[col]) for col in headers]
+            rows_to_append.append(row_data)
+
+    # 5. 구글 시트에 일괄 추가 (append)
+    if rows_to_append:
+        sheet.append_rows(rows_to_append)
+        print(f"✅ 구글 스프레드시트에 신규 클레임 {len(rows_to_append)}건 업로드 완료!")
+    else:
+        print("ℹ️ 신규로 추가할 클레임 데이터가 없습니다. (모두 기존 등록건)")
+
 
 if __name__ == "__main__":
-    run_automation()
+    downloaded_path = download_excel_file()
+    if downloaded_path and GOOGLE_SERVICE_ACCOUNT_JSON:
+        update_google_sheet(downloaded_path)
