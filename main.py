@@ -46,12 +46,15 @@ target_start_date = start_date_obj.strftime("%Y/%m/%d")
 target_end_date = end_date_obj.strftime("%Y/%m/%d")
 daterange_str = f"{target_start_date} - {target_end_date}"
 
-# 2. 크롬 브라우저 다운로드 설정 (Headless)
+# 2. 크롬 브라우저 다운로드 & 타임아웃 방지 최적화 옵션
 download_dir = os.getcwd()
 options = webdriver.ChromeOptions()
-options.add_argument('--headless')
+options.add_argument('--headless=new')
 options.add_argument('--no-sandbox')
 options.add_argument('--disable-dev-shm-usage')
+options.add_argument('--disable-gpu')
+options.add_argument('--disable-software-rasterizer')
+options.add_argument('--disable-extensions')
 options.add_experimental_option("prefs", {
     "download.default_directory": download_dir,
     "download.prompt_for_download": False,
@@ -60,7 +63,9 @@ options.add_experimental_option("prefs", {
 })
 
 driver = webdriver.Chrome(options=options)
+driver.set_page_load_timeout(60)
 driver.set_window_size(1920, 1080)
+
 driver.command_executor._commands["send_command"] = ("POST", '/session/$sessionId/chromium/send_command')
 params = {'cmd': 'Page.setDownloadBehavior', 'params': {'behavior': 'allow', 'downloadPath': download_dir}}
 driver.execute_script("return null;")
@@ -80,7 +85,13 @@ def send_data_to_google_sheet(excel_file_path):
         df = pd.read_csv(excel_file_path)
 
     df = df.fillna("")
-    rows_data = df.values.tolist()
+    
+    # 💡 [수정] 엑셀의 1행(컬럼 헤더)을 데이터 맨 앞에 포함시켜 전달합니다.
+    headers = list(df.columns)
+    data_rows = df.values.tolist()
+    
+    # 헤더와 데이터 결합 (0번 행 = 헤더)
+    rows_data = [headers] + data_rows
 
     if not rows_data:
         print("⚠️ 엑셀 파일 내 데이터가 없습니다.", flush=True)
@@ -95,7 +106,7 @@ def send_data_to_google_sheet(excel_file_path):
         
         res_json = response.json()
         if res_json.get("result") == "success":
-            print(f"✅ 구글 시트 업로드 성공! (신규 추가: {res_json.get('added')}건)", flush=True)
+            print(f"✅ 구글 시트 업로드 성공! (헤더 포함 데이터 처리 완료)", flush=True)
         else:
             print(f"❌ Apps Script 오류: {res_json.get('error')}", flush=True)
 
@@ -160,7 +171,7 @@ try:
         driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.F2)
     time.sleep(6)
 
-    # 7. 컬럼 헤더 영역 우클릭 (기존 성공 코드 방식 동일 적용)
+    # 7. 컬럼 헤더 영역 우클릭
     print("[5/6] 컬럼 헤더 영역 우클릭 메뉴 호출...", flush=True)
     try:
         header_element = driver.find_element(By.CSS_SELECTOR, 'thead th')
@@ -175,7 +186,7 @@ try:
 
     driver.save_screenshot(os.path.join(output_dir, "step5_context_menu.png"))
 
-    # 8. '엑셀다운로드' 메뉴 JS 클릭 & SweetAlert 팝업 처리 (기존 성공 패턴 100% 동일화)
+    # 8. '엑셀다운로드' 메뉴 JS 클릭 & SweetAlert 팝업 처리
     print("[6/6] 엑셀다운로드 실행 중...", flush=True)
     excel_btn = driver.find_element(By.XPATH, "//*[contains(text(), '엑셀다운로드')]")
     driver.execute_script("arguments[0].click();", excel_btn)
