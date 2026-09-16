@@ -24,9 +24,9 @@ openpyxl.styles.cell_style.CellStyle.__init__ = _patched_cell_style_init
 
 warnings.filterwarnings('ignore')
 
-# 💡 환경 변수 설정
+# 💡 최신 배포 웹앱 URL 지정
 LOGIN_URL = "https://admin.theborn.co.kr/oms-manager/login"
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwMgR7Cvk25mYvAUJdhKw74jXBoxe4siYKCyH-5eMsfxZ126RT0Xs_2YbdJQGQmcxSV/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyRN8rfdpqIE5yO2r-cfZF2vAQ3YXwVx6bB8oHDcGaizngSaZXVNbiUxqAl1CjRLrf5/exec"
 
 OMS_COMPANY_CODE = os.environ.get("COMPANY_CD", "1000").strip()
 OMS_ID = os.environ.get("USER_ID", "").strip()
@@ -46,7 +46,7 @@ target_start_date = start_date_obj.strftime("%Y/%m/%d")
 target_end_date = end_date_obj.strftime("%Y/%m/%d")
 daterange_str = f"{target_start_date} - {target_end_date}"
 
-# 2. 크롬 브라우저 다운로드 & 타임아웃 방지 최적화 옵션
+# 2. 크롬 브라우저 다운로드 설정
 download_dir = os.getcwd()
 options = webdriver.ChromeOptions()
 options.add_argument('--headless=new')
@@ -80,17 +80,15 @@ def send_data_to_google_sheet(excel_file_path):
     print("🚀 Google Apps Script 웹앱으로 데이터 전송 시작...", flush=True)
 
     try:
-        df = pd.read_excel(excel_file_path, engine='openpyxl')
+        # 💡 [핵심] dtype=str 적용하여 파이썬이 숫자를 날짜로 임의 변환하지 않고 텍스트 형태로 100% 온전히 읽도록 처리
+        df = pd.read_excel(excel_file_path, engine='openpyxl', dtype=str)
     except Exception:
-        df = pd.read_csv(excel_file_path)
+        df = pd.read_csv(excel_file_path, dtype=str)
 
     df = df.fillna("")
     
-    # 💡 [수정] 엑셀의 1행(컬럼 헤더)을 데이터 맨 앞에 포함시켜 전달합니다.
     headers = list(df.columns)
     data_rows = df.values.tolist()
-    
-    # 헤더와 데이터 결합 (0번 행 = 헤더)
     rows_data = [headers] + data_rows
 
     if not rows_data:
@@ -106,7 +104,7 @@ def send_data_to_google_sheet(excel_file_path):
         
         res_json = response.json()
         if res_json.get("result") == "success":
-            print(f"✅ 구글 시트 업로드 성공! (헤더 포함 데이터 처리 완료)", flush=True)
+            print(f"✅ 구글 시트 업로드 & 서식 정제 & 메일 발송 성공!", flush=True)
         else:
             print(f"❌ Apps Script 오류: {res_json.get('error')}", flush=True)
 
@@ -118,7 +116,6 @@ try:
     print(f"[{now_kst.strftime('%Y-%m-%d %H:%M:%S')}] 품질 클레임 관리 자동 수집 시작", flush=True)
     print(f"조회 지정 기간 (과거 3주): {target_start_date} ~ {target_end_date}", flush=True)
 
-    # 3. 로그인 진행
     print("[1/6] OMS 로그인 진행 중...", flush=True)
     driver.get(LOGIN_URL)
     time.sleep(2)
@@ -127,7 +124,6 @@ try:
     driver.find_element(By.ID, 'userPw').send_keys(OMS_PW + Keys.ENTER)
     time.sleep(4)
 
-    # 4. 메뉴 순차적 클릭 이동
     print("[2/6] 메뉴 계층 탐색 중...", flush=True)
     try:
         bor_menu = driver.find_element(By.CSS_SELECTOR, "a[data-menu-id='BOR']")
@@ -147,7 +143,6 @@ try:
     driver.execute_script("arguments[0].click();", claim_menu)
     time.sleep(5)
 
-    # 5. 날짜 범위 입력 (BOR210)
     print("[3/6] 3주간 날짜 범위 설정 중...", flush=True)
     js_script = f"""
         var rangeInput = document.getElementsByName('BOR210_daterange')[0];
@@ -163,7 +158,6 @@ try:
     driver.execute_script(js_script)
     time.sleep(2)
 
-    # 6. [조회] 실행 (F2 키 또는 버튼)
     print("[4/6] [조회] 실행...", flush=True)
     try:
         driver.find_element(By.CSS_SELECTOR, "button.form_btn_search[data-shortcut='F2']").click()
@@ -171,7 +165,6 @@ try:
         driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.F2)
     time.sleep(6)
 
-    # 7. 컬럼 헤더 영역 우클릭
     print("[5/6] 컬럼 헤더 영역 우클릭 메뉴 호출...", flush=True)
     try:
         header_element = driver.find_element(By.CSS_SELECTOR, 'thead th')
@@ -184,9 +177,6 @@ try:
         print(f"⚠️ ActionChains 우클릭 실패, JS 시도: {e}", flush=True)
     time.sleep(2)
 
-    driver.save_screenshot(os.path.join(output_dir, "step5_context_menu.png"))
-
-    # 8. '엑셀다운로드' 메뉴 JS 클릭 & SweetAlert 팝업 처리
     print("[6/6] 엑셀다운로드 실행 중...", flush=True)
     excel_btn = driver.find_element(By.XPATH, "//*[contains(text(), '엑셀다운로드')]")
     driver.execute_script("arguments[0].click();", excel_btn)
@@ -211,7 +201,6 @@ try:
         pass
     time.sleep(5)
 
-    # 9. 파일 수신 및 데이터 전송
     list_of_files = glob.glob(os.path.join(download_dir, '*.xlsx')) or glob.glob(os.path.join(download_dir, '*.xls'))
     if not list_of_files:
         raise Exception("다운로드 파일 수신 실패")
@@ -228,7 +217,6 @@ except Exception as e:
     print(f"❌ 오류 발생: {e}", flush=True)
     try:
         driver.save_screenshot(os.path.join(output_dir, "error_screenshot.png"))
-        print(f"📸 에러 화면 캡처 완료: {os.path.join(output_dir, 'error_screenshot.png')}", flush=True)
     except Exception:
         pass
 finally:
