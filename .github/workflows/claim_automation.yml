@@ -1,36 +1,39 @@
-name: Daily Claim Downloader
+name: Test Login and Claim Download
 
 on:
-  schedule:
-    # 한국 시간(KST) 매일 오전 8시 실행 (UTC 기준 전날 23:00)
-    - cron: '0 23 * * *'
-  workflow_dispatch: # 수동 실행 버튼 활성화
+  workflow_dispatch: # 수동으로 실행 버튼(Run workflow)을 눌러 테스트
 
 jobs:
-  run-automation:
+  test-run:
     runs-on: ubuntu-latest
 
     steps:
     - name: 저장소 코드 가져오기
       uses: actions/checkout@v4
 
-    - name: Python 설치
+    - name: Python 3.10 설치
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
-    - name: 필수 패키지 및 Chromium 설치
+    - name: 라이브러리 및 Chromium 설치
       run: |
         python -m pip install --upgrade pip
-        pip install playwright gspread google-auth pandas openpyxl
+        pip install playwright
         playwright install --with-deps chromium
 
-    - name: 자동화 스크립트 실행
+    - name: 로그인 및 다운로드 테스트 실행
       env:
         COMPANY_CD: ${{ secrets.COMPANY_CD }}
         USER_ID: ${{ secrets.USER_ID }}
         USER_PW: ${{ secrets.USER_PW }}
-        GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-        SPREADSHEET_KEY: ${{ secrets.SPREADSHEET_KEY }}
       run: |
         python main.py
+
+    # 📸 실행 완료 후 캡처 이미지와 다운로드 파일을 GitHub 웹페이지에 업로드
+    - name: 실행 결과(캡처 이미지 & 다운로드 파일) 저장
+      if: always() # 성공/실패 여부와 관계없이 저장
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: ./output/
