@@ -1,380 +1,223 @@
-function doPost(e) {
-  try {
-    var data = JSON.parse(e.postData.contents);
+import os
+import re
+import glob
+import time
+import json
+import warnings
+import requests
+import pandas as pd
+from datetime import datetime, timedelta, timezone
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 
-    // 💡 1. 사용자가 웹페이지에서 '컬럼 서식 저장'을 눌렀을 때 '해당 담당자 이름'으로 따로 저장!
-    if (data && data.action === "saveLayout") {
-      var personName = data.targetName || "전체";
-      PropertiesService.getScriptProperties().setProperty("COLUMN_LAYOUT_" + personName, JSON.stringify(data.layout));
-      return ContentService.createTextOutput(JSON.stringify({result: "success"})).setMimeType(ContentService.MimeType.JSON);
-    }
+# openpyxl CellStyle count 속성 오류 방지 패치
+import openpyxl.styles.cell_style
+_original_cell_style_init = openpyxl.styles.cell_style.CellStyle.__init__
 
-    // 💡 2. 파이썬(GitHub)에서 들어오는 데이터 처리
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var claimSheet = ss.getSheetByName("클레임") || ss.getSheets()[0];
-    var listSheet = ss.getSheetByName("발송자리스트");
+def _patched_cell_style_init(self, *args, **kwargs):
+    kwargs.pop('count', None)
+    _original_cell_style_init(self, *args, **kwargs)
 
-    if (!data || data.length === 0) {
-      return ContentService.createTextOutput(JSON.stringify({result: "empty", added: 0})).setMimeType(ContentService.MimeType.JSON);
-    }
+openpyxl.styles.cell_style.CellStyle.__init__ = _patched_cell_style_init
 
-    claimSheet.clearContents();
-    claimSheet.getRange(1, 1, data.length, data[0].length).setValues(data);
+warnings.filterwarnings('ignore')
 
-    var processedResult = processAndFormatClaimData();
+# 💡 최신 배포 웹앱 URL 지정
+LOGIN_URL = "https://admin.theborn.co.kr/oms-manager/login"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwwxvKcQSje0jId66HZWKw8qmcsdJoqO8_5EKpWuw9b7AVxINrdHL6pOneUnSL6qiUl/exec"
+
+OMS_COMPANY_CODE = os.environ.get("COMPANY_CD", "1000").strip()
+OMS_ID = os.environ.get("USER_ID", "").strip()
+OMS_PW = os.environ.get("USER_PW", "").strip()
+
+output_dir = "./output"
+os.makedirs(output_dir, exist_ok=True)
+
+# 1. KST 날짜 계산 (과거 3주간)
+KST = timezone(timedelta(hours=9))
+now_kst = datetime.now(KST)
+
+start_date_obj = now_kst - timedelta(days=20)
+end_date_obj = now_kst
+
+target_start_date = start_date_obj.strftime("%Y/%m/%d")
+target_end_date = end_date_obj.strftime("%Y/%m/%d")
+daterange_str = f"{target_start_date} - {target_end_date}"
+
+# 2. 크롬 브라우저 다운로드 설정
+download_dir = os.getcwd()
+options = webdriver.ChromeOptions()
+options.add_argument('--headless=new')
+options.add_argument('--no-sandbox')
+options.add_argument('--disable-dev-shm-usage')
+options.add_argument('--disable-gpu')
+options.add_argument('--disable-software-rasterizer')
+options.add_argument('--disable-extensions')
+options.add_experimental_option("prefs", {
+    "download.default_directory": download_dir,
+    "download.prompt_for_download": False,
+    "download.directory_upgrade": True,
+    "safebrowsing.enabled": True
+})
+
+driver = webdriver.Chrome(options=options)
+driver.set_page_load_timeout(60)
+driver.set_window_size(1920, 1080)
+
+driver.command_executor._commands["send_command"] = ("POST", '/session/$sessionId/chromium/send_command')
+params = {'cmd': 'Page.setDownloadBehavior', 'params': {'behavior': 'allow', 'downloadPath': download_dir}}
+driver.execute_script("return null;")
+driver.execute("send_command", params)
+
+
+def send_data_to_google_sheet(excel_file_path):
+    if not excel_file_path or not os.path.exists(excel_file_path):
+        print("⚠️ 전송할 엑셀 파일이 존재하지 않습니다.", flush=True)
+        return
+
+    print("🚀 Google Apps Script 웹앱으로 데이터 전송 시작...", flush=True)
+
+    try:
+        # 💡 [핵심] dtype=str 적용하여 파이썬이 숫자를 날짜로 임의 변환하지 않고 텍스트 형태로 100% 온전히 읽도록 처리
+        df = pd.read_excel(excel_file_path, engine='openpyxl', dtype=str)
+    except Exception:
+        df = pd.read_csv(excel_file_path, dtype=str)
+
+    df = df.fillna("")
     
-    if (listSheet) {
-      var lastRow = listSheet.getLastRow();
-      if (lastRow > 0) {
-        var emailData = listSheet.getRange(1, 2, lastRow, 1).getValues();
-        var emailList = [];
-        for (var i = 0; i < emailData.length; i++) {
-          var emailStr = String(emailData[i][0]).trim();
-          if (emailStr.indexOf("@") !== -1) emailList.push(emailStr);
-        }
+    headers = list(df.columns)
+    data_rows = df.values.tolist()
+    rows_data = [headers] + data_rows
+
+    if not rows_data:
+        print("⚠️ 엑셀 파일 내 데이터가 없습니다.", flush=True)
+        return
+
+    try:
+        response = requests.post(
+            WEBAPP_URL,
+            data=json.dumps(rows_data),
+            headers={"Content-Type": "application/json"}
+        )
         
-        if (emailList.length > 0) {
-          var groupEmails = emailList.join(",");
-          sendTotalClaimEmail(groupEmails);
-        }
-      }
-    }
+        res_json = response.json()
+        if res_json.get("result") == "success":
+            print(f"✅ 구글 시트 업로드 & 서식 정제 & 메일 발송 성공!", flush=True)
+        else:
+            print(f"❌ Apps Script 오류: {res_json.get('error')}", flush=True)
 
-    return ContentService.createTextOutput(JSON.stringify({
-      result: "success", 
-      total_rows: data.length - 1,
-      sent_persons: Object.keys(processedResult).length
-    })).setMimeType(ContentService.MimeType.JSON);
+    except Exception as e:
+        print(f"❌ HTTP 요청 실패: {e}", flush=True)
 
-  } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({result: "error", error: err.toString()})).setMimeType(ContentService.MimeType.JSON);
-  }
-}
 
-// 💡 [개인별로 저장된 열 서식(순서, 숨김, 너비)을 적용하여 웹페이지 구성]
-function doGet(e) {
-  try {
-    var targetName = (e && e.parameter && e.parameter.name) ? e.parameter.name : "전체";
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var claimSheet = ss.getSheetByName("클레임");
-    var data = claimSheet.getDataRange().getDisplayValues();
+try:
+    print(f"[{now_kst.strftime('%Y-%m-%d %H:%M:%S')}] 품질 클레임 관리 자동 수집 시작", flush=True)
+    print(f"조회 지정 기간 (과거 3주): {target_start_date} ~ {target_end_date}", flush=True)
 
-    var webAppUrl = "https://script.google.com/macros/s/AKfycbxACYFrxGPsNimEsbB3rSEUroxm-cHFqmUnL9t2CIhzQGISIZyEirgDXjhHaVOMFvhe/exec";
+    print("[1/6] OMS 로그인 진행 중...", flush=True)
+    driver.get(LOGIN_URL)
+    time.sleep(2)
+    driver.find_element(By.ID, 'companyCd').send_keys(OMS_COMPANY_CODE)
+    driver.find_element(By.ID, 'userId').send_keys(OMS_ID)
+    driver.find_element(By.ID, 'userPw').send_keys(OMS_PW + Keys.ENTER)
+    time.sleep(4)
 
-    // 기본 열 너비 (처음 열었을 때 세팅되는 값)
-    var defaultWidths = {"품목담당자명": 80, "반품번호": 130, "등록일시": 85, "거래처코드": 75, "거래처명": 150, "반품전화번호": 110, "품목코드": 90, "품목명": 220, "요청내역": 350, "수량": 45, "확인자명": 80, "확인일시": 85};
+    print("[2/6] 메뉴 계층 탐색 중...", flush=True)
+    try:
+        bor_menu = driver.find_element(By.CSS_SELECTOR, "a[data-menu-id='BOR']")
+        driver.execute_script("arguments[0].click();", bor_menu)
+        time.sleep(2)
+    except Exception:
+        pass
 
-    // 💡 구글 서버에 저장된 '해당 담당자의 개인 서식' 불러오기
-    var savedLayoutRaw = PropertiesService.getScriptProperties().getProperty("COLUMN_LAYOUT_" + targetName);
-    var savedLayout = savedLayoutRaw ? JSON.parse(savedLayoutRaw) : null;
-    var rawHeaders = data.length > 0 ? data[0] : [];
+    try:
+        return_folder = driver.find_element(By.XPATH, "//*[contains(text(), '반품관리')]")
+        driver.execute_script("arguments[0].click();", return_folder)
+        time.sleep(1)
+    except Exception:
+        pass
 
-    if (!savedLayout || !Array.isArray(savedLayout)) {
-      savedLayout = rawHeaders.map(function(h) { return { name: h, visible: true, width: defaultWidths[h] || 100 }; });
-    } else {
-      var existingNames = savedLayout.map(function(item) { return item.name; });
-      rawHeaders.forEach(function(h) {
-        if (existingNames.indexOf(h) === -1) {
-          savedLayout.push({ name: h, visible: true, width: defaultWidths[h] || 100 });
-        }
-      });
-      // 예전 서식에 width가 없을 경우를 대비한 보정
-      savedLayout.forEach(function(item) {
-        if (!item.width) item.width = defaultWidths[item.name] || 100;
-      });
-    }
+    claim_menu = driver.find_element(By.XPATH, "//*[contains(text(), '품질 클레임 관리')]")
+    driver.execute_script("arguments[0].click();", claim_menu)
+    time.sleep(5)
 
-    var displayCols = [];
-    savedLayout.forEach(function(item) {
-      if (item.visible) {
-        var idx = rawHeaders.indexOf(item.name);
-        if (idx !== -1) displayCols.push({ idx: idx, name: item.name, width: item.width });
-      }
-    });
+    print("[3/6] 3주간 날짜 범위 설정 중...", flush=True)
+    js_script = f"""
+        var rangeInput = document.getElementsByName('BOR210_daterange')[0];
+        if(rangeInput) {{
+            rangeInput.value = '{daterange_str}';
+            rangeInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        }}
+        var startInput = document.getElementById('BOR210_startDt');
+        var endInput = document.getElementById('BOR210_endDt');
+        if(startInput) startInput.value = '{target_start_date}';
+        if(endInput) endInput.value = '{target_end_date}';
+    """
+    driver.execute_script(js_script)
+    time.sleep(2)
 
-    var html = "<div style='font-family: \"Malgun Gothic\", sans-serif; padding: 20px; max-width: 1500px; margin: 0 auto;'>";
-    
-    html += "<div style='display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #3498db; padding-bottom: 12px; margin-bottom: 20px;'>";
-    html += "<h2 style='color: #2c3e50; margin: 0;'>📊 " + targetName + " 담당자 클레임 내역</h2>";
-    
-    html += "<div style='display: flex; gap: 10px; align-items: center;'>" +
-            "<input type='text' id='filterInput' onkeyup='filterTable()' placeholder='🔍 거래처, 품목명, 내역 검색...' " +
-            "style='padding: 8px 14px; font-size: 13px; border: 1px solid #3498db; border-radius: 6px; width: 240px; outline: none;'>" +
-            "<button onclick='openModal()' style='padding: 8px 14px; font-size: 13px; background-color: #2c3e50; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: bold;'>⚙️ 내 화면 서식 설정</button>" +
-            "</div></div>";
+    print("[4/6] [조회] 실행...", flush=True)
+    try:
+        driver.find_element(By.CSS_SELECTOR, "button.form_btn_search[data-shortcut='F2']").click()
+    except Exception:
+        driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.F2)
+    time.sleep(6)
 
-    if (data.length > 1) {
-      // 💡 가로 스크롤을 지원하는 컨테이너
-      html += "<div style='overflow-x: auto; width: 100%; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);'>";
-      html += "<table id='claimTable' style='border-collapse: collapse; min-width: 100%; font-size: 13px; text-align: center;' border='1'>";
-      html += "<thead style='background-color: #f2f2f2; font-weight: bold;'><tr>";
+    print("[5/6] 컬럼 헤더 영역 우클릭 메뉴 호출...", flush=True)
+    try:
+        header_element = driver.find_element(By.CSS_SELECTOR, 'thead th')
+    except Exception:
+        header_element = driver.find_element(By.TAG_NAME, 'th')
 
-      displayCols.forEach(function(col) {
-        html += "<th style='padding: 12px 8px; border: 1px solid #ddd; min-width: " + col.width + "px; max-width: " + col.width + "px; word-break: break-word;'>" + col.name + "</th>";
-      });
-      html += "</tr></thead><tbody>";
+    try:
+        ActionChains(driver).context_click(header_element).perform()
+    except Exception as e:
+        print(f"⚠️ ActionChains 우클릭 실패, JS 시도: {e}", flush=True)
+    time.sleep(2)
 
-      var nameIndex = rawHeaders.indexOf("품목담당자명");
-      if (nameIndex === -1) nameIndex = 0;
+    print("[6/6] 엑셀다운로드 실행 중...", flush=True)
+    excel_btn = driver.find_element(By.XPATH, "//*[contains(text(), '엑셀다운로드')]")
+    driver.execute_script("arguments[0].click();", excel_btn)
+    time.sleep(2)
 
-      var count = 0;
-      for (var i = 1; i < data.length; i++) {
-        var rowName = String(data[i][nameIndex]).trim();
-        if (targetName === "전체" || rowName === targetName) {
-          html += "<tr style='background-color: " + (count % 2 === 0 ? "#fff" : "#f9f9f9") + ";'>";
-          displayCols.forEach(function(col) {
-            var alignLeft = (col.name === "요청내역" || col.name === "품목명" || col.name === "거래처명");
-            var textAlign = alignLeft ? "left" : "center";
-            var padding = alignLeft ? "8px 12px" : "8px";
-            
-            html += "<td style='padding: " + padding + "; border: 1px solid #ddd; min-width: " + col.width + "px; max-width: " + col.width + "px; word-break: break-word; text-align: " + textAlign + ";'>" + data[i][col.idx] + "</td>";
-          });
-          html += "</tr>";
-          count++;
-        }
-      }
-      html += "</tbody></table></div>";
-      
-      if (count === 0) {
-        html += "<p style='margin-top: 20px; color: #e74c3c; font-weight: bold;'>조회된 클레임 내역이 없습니다.</p>";
-      }
-    } else {
-      html += "<p style='margin-top: 20px;'>데이터가 없습니다.</p>";
-    }
-    
-    // 💡 모달 창 UI (내 전용 서식 저장 안내문구 수정)
-    html += "<div id='layoutModal' style='display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:9999; align-items:center; justify-content:center;'>" +
-      "<div style='background:#fff; padding:25px; border-radius:10px; width:450px; max-height:85vh; overflow-y:auto; box-shadow:0 4px 15px rgba(0,0,0,0.2);'>" +
-      "<h3 style='margin-top:0; border-bottom:2px solid #3498db; padding-bottom:10px; color:#2c3e50;'>⚙️ [" + targetName + "] 전용 서식 설정</h3>" +
-      "<p style='font-size:12px; color:#666; margin-bottom:15px; line-height:1.5;'>✔️ 체크 해제 시 열 숨김<br/>✔️ <b>[크기]</b>에 숫자를 입력하여 가로 넓이(px) 변경<br/>✔️ 이 설정은 <b>다른 담당자 화면에는 영향을 주지 않습니다.</b></p>" +
-      "<ul id='layoutList' style='list-style:none; padding:0; margin:0 0 20px 0;'></ul>" +
-      "<div style='text-align:right; border-top:1px solid #eee; padding-top:15px;'>" +
-      "<button onclick='closeModal()' style='padding:8px 15px; margin-right:8px; border:1px solid #ccc; background:#f5f5f5; border-radius:5px; cursor:pointer;'>취소</button>" +
-      "<button onclick='saveLayoutToServer()' style='padding:8px 15px; background:#27ae60; color:#fff; border:none; border-radius:5px; cursor:pointer; font-weight:bold;'>💾 내 서식 저장하기</button>" +
-      "</div></div></div>";
+    try:
+        swal_input = driver.find_element(By.CSS_SELECTOR, "input.swal2-input")
+        swal_input.clear()
+        swal_input.send_keys("claim_download")
+    except Exception:
+        pass
+    time.sleep(1)
 
-    // 💡 클라이언트 자바스크립트
-    html += "<script>" +
-      "var layout = " + JSON.stringify(savedLayout) + ";" +
-      "var webAppUrl = '" + webAppUrl + "';" +
-      "var targetName = '" + targetName + "';" +  // 현재 뷰어의 이름표 기록
-      
-      "function openModal() { renderLayoutList(); document.getElementById('layoutModal').style.display = 'flex'; }" +
-      "function closeModal() { document.getElementById('layoutModal').style.display = 'none'; }" +
-      
-      "function renderLayoutList() {" +
-      "  var ul = document.getElementById('layoutList'); ul.innerHTML = '';" +
-      "  layout.forEach(function(item, idx) {" +
-      "    var li = document.createElement('li');" +
-      "    li.style.cssText = 'display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid #eee;';" +
-      
-      "    var left = document.createElement('div');" +
-      "    left.style.cssText = 'display:flex; align-items:center; gap:6px;';" +
-      "    left.innerHTML = \"<input type='checkbox' id='chk_\" + idx + \"' \" + (item.visible ? 'checked' : '') + \" onchange='layout[\" + idx + \"].visible = this.checked' style='cursor:pointer;'> \" +" +
-      "                     \"<label for='chk_\" + idx + \"' style='font-weight:bold; font-size:13px; cursor:pointer; min-width:85px; display:inline-block;'>\" + item.name + \"</label> \" +" +
-      "                     \"<span style='font-size:11px; color:#888;'>크기:</span> <input type='number' value='\" + item.width + \"' onchange='layout[\" + idx + \"].width = parseInt(this.value) || 100' style='width:45px; padding:3px; font-size:12px; border:1px solid #ccc; border-radius:3px; text-align:right;'> <span style='font-size:11px; color:#888;'>px</span>\";" +
-      
-      "    var right = document.createElement('div');" +
-      "    right.innerHTML = \"<button onclick='moveItem(\" + idx + \", -1)' style='padding:2px 8px; margin-right:3px; cursor:pointer; background:#f0f0f0; border:1px solid #ddd; border-radius:3px;'>▲</button><button onclick='moveItem(\" + idx + \", 1)' style='padding:2px 8px; cursor:pointer; background:#f0f0f0; border:1px solid #ddd; border-radius:3px;'>▼</button>\";" +
-      
-      "    li.appendChild(left); li.appendChild(right); ul.appendChild(li);" +
-      "  });" +
-      "}" +
-      
-      "function moveItem(idx, dir) {" +
-      "  var targetIdx = idx + dir;" +
-      "  if (targetIdx < 0 || targetIdx >= layout.length) return;" +
-      "  var temp = layout[idx]; layout[idx] = layout[targetIdx]; layout[targetIdx] = temp;" +
-      "  renderLayoutList();" +
-      "}" +
-      
-      "function saveLayoutToServer() {" +
-      "  if(!confirm('[" + targetName + "] 담당자님의 전용 서식을 이대로 저장하시겠습니까?\\n(다른 사람의 화면에는 영향을 주지 않습니다.)')) return;" +
-      "  fetch(webAppUrl, {" +
-      "    method: 'POST'," +
-      "    headers: {'Content-Type': 'text/plain'}," +
-      "    body: JSON.stringify({ action: 'saveLayout', layout: layout, targetName: targetName })" +
-      "  })" +
-      "  .then(function(res){ return res.json(); })" +
-      "  .then(function(data){" +
-      "    if(data.result === 'success') {" +
-      "      alert('✅ 내 전용 서식이 성공적으로 저장되었습니다!');" +
-      "      location.reload();" +
-      "    } else {" +
-      "      alert('❌ 저장 실패: ' + JSON.stringify(data));" +
-      "    }" +
-      "  })" +
-      "  .catch(function(err){ alert('❌ 에러 발생: ' + err); });" +
-      "}" +
+    download_btn = driver.find_element(By.CSS_SELECTOR, "button.swal2-confirm")
+    driver.execute_script("arguments[0].click();", download_btn)
+    time.sleep(5)
 
-      "function filterTable() {" +
-      "  var input = document.getElementById('filterInput');" +
-      "  var filter = input.value.toLowerCase().trim();" +
-      "  var table = document.getElementById('claimTable');" +
-      "  var tr = table.getElementsByTagName('tr');" +
-      "  for (var i = 1; i < tr.length; i++) {" +
-      "    var tdList = tr[i].getElementsByTagName('td');" +
-      "    var match = false;" +
-      "    for (var j = 0; j < tdList.length; j++) {" +
-      "      if (tdList[j] && tdList[j].textContent.toLowerCase().indexOf(filter) > -1) {" +
-      "        match = true; break;" +
-      "      }" +
-      "    }" +
-      "    tr[i].style.display = match ? '' : 'none';" +
-      "  }" +
-      "}" +
-      "</script>";
+    try:
+        ok_btn = driver.find_element(By.CSS_SELECTOR, "button.swal2-confirm")
+        driver.execute_script("arguments[0].click();", ok_btn)
+    except Exception:
+        pass
+    time.sleep(5)
 
-    html += "</div>";
-    return HtmlService.createHtmlOutput(html).setTitle(targetName + " 뷰어");
+    list_of_files = glob.glob(os.path.join(download_dir, '*.xlsx')) or glob.glob(os.path.join(download_dir, '*.xls'))
+    if not list_of_files:
+        raise Exception("다운로드 파일 수신 실패")
 
-  } catch (err) {
-    return HtmlService.createHtmlOutput("<h3 style='color:red;'>❌ 오류 발생:</h3><p>" + err.toString() + "</p>");
-  }
-}
+    latest_file = max(list_of_files, key=os.path.getctime)
+    print(f"📥 수신된 파일: {latest_file}", flush=True)
 
-function formatDateToYYYYMMDD(val) {
-  if (!val) return "";
-  if (val instanceof Date) return Utilities.formatDate(val, "Asia/Seoul", "yyyy-MM-dd");
-  var str = String(val).trim();
-  var match = str.match(/(\d{4})[-.\/]\s*(\d{1,2})[-.\/]\s*(\d{1,2})/);
-  if (match) return match[1] + "-" + ("0" + match[2]).slice(-2) + "-" + ("0" + match[3]).slice(-2);
-  return str;
-}
+    send_data_to_google_sheet(latest_file)
 
-function processAndFormatClaimData() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var listSheet = ss.getSheetByName("발송자리스트");
-  var claimSheet = ss.getSheetByName("클레임");
+    if os.path.exists(latest_file):
+        os.remove(latest_file)
 
-  var targetColumns = ["품목담당자명", "반품번호", "등록일시", "거래처코드", "거래처명", "반품전화번호", "품목코드", "품목명", "요청내역", "수량", "확인자명", "확인일시"];
-  var columnWidths = {"품목담당자명": 80, "반품번호": 150, "등록일시": 75, "거래처코드": 70, "거래처명": 200, "반품전화번호": 100, "품목코드": 100, "품목명": 230, "요청내역": 400, "수량": 50, "확인자명": 150, "확인일시": 75};
-
-  var claimValues = claimSheet.getDataRange().getValues();
-  if (claimValues.length < 2) return {};
-
-  var originalHeaders = claimValues[0].map(function(h) { return String(h).trim(); });
-  var originalRows = claimValues.slice(1);
-  var colIndexes = targetColumns.map(function(targetCol) { return originalHeaders.indexOf(targetCol); });
-  var statusColIndex = originalHeaders.indexOf("접수여부");
-  var progressColIndex = originalHeaders.indexOf("진행상태");
-  var regDateIdxInTarget = targetColumns.indexOf("등록일시");
-  var confirmDateIdxInTarget = targetColumns.indexOf("확인일시");
-
-  var reorderedRows = originalRows.map(function(row) {
-    return colIndexes.map(function(idx, colArrIdx) {
-      if (idx !== -1 && idx < row.length) {
-        var val = row[idx];
-        if (colArrIdx === regDateIdxInTarget || colArrIdx === confirmDateIdxInTarget) return formatDateToYYYYMMDD(val);
-        return (val instanceof Date) ? Utilities.formatDate(val, "Asia/Seoul", "yyyy-MM-dd") : String(val).trim();
-      }
-      return "";
-    });
-  });
-
-  var lastRowList = listSheet.getLastRow();
-  var targetNames = [];
-  if (lastRowList > 0) {
-    var listData = listSheet.getRange(1, 1, lastRowList, 1).getValues();
-    listData.forEach(function(row) {
-      var n = String(row[0]).trim();
-      if (n && n !== "이름" && n !== "담당자") targetNames.push(n);
-    });
-  }
-
-  var filteredReorderedRows = reorderedRows.filter(function(r, idx) {
-    var origRow = originalRows[idx];
-    var targetPerson = String(r[0]).trim();
-    var rawStatus = statusColIndex !== -1 ? String(origRow[statusColIndex]).replace(/\s+/g, "").toUpperCase() : "";
-    var rawProgress = progressColIndex !== -1 ? String(origRow[progressColIndex]).trim() : "";
-    var isProgressMatched = (progressColIndex === -1) || (rawProgress === "확인");
-    return targetNames.indexOf(targetPerson) !== -1 && rawStatus !== "Y" && isProgressMatched;
-  });
-
-  filteredReorderedRows.sort(function(a, b) { return String(a[0]).localeCompare(String(b[0]), 'ko'); });
-  claimSheet.clear();
-
-  var finalTableData = [targetColumns].concat(filteredReorderedRows);
-  var totalRows = finalTableData.length;
-  var range = claimSheet.getRange(1, 1, totalRows, targetColumns.length);
-  
-  range.setNumberFormat("@");
-  range.setValues(finalTableData);
-
-  var maxCols = claimSheet.getMaxColumns();
-  if (maxCols > targetColumns.length) claimSheet.deleteColumns(targetColumns.length + 1, maxCols - targetColumns.length);
-
-  var qtyColIdx = targetColumns.indexOf("수량") + 1;
-  if (totalRows > 1 && qtyColIdx > 0) claimSheet.getRange(2, qtyColIdx, totalRows - 1, 1).setNumberFormat("#,##0");
-
-  range.setBorder(true, true, true, true, true, true, "#000000", SpreadsheetApp.BorderStyle.SOLID);
-  claimSheet.getRange(1, 1, 1, targetColumns.length).setFontWeight("bold").setHorizontalAlignment("center");
-  range.setWrapStrategy(SpreadsheetApp.WrapStrategy.WRAP);
-  SpreadsheetApp.flush();
-
-  for (var col = 1; col <= targetColumns.length; col++) {
-    var colName = targetColumns[col - 1];
-    var specifiedWidth = columnWidths[colName];
-    if (specifiedWidth) claimSheet.setColumnWidth(col, specifiedWidth);
-  }
-  return {};
-}
-
-function sendTotalClaimEmail(recipientEmails) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var claimSheet = ss.getSheetByName("클레임");
-  var data = claimSheet.getDataRange().getDisplayValues();
-  if (data.length < 2) return; 
-
-  var headers = data[0];
-  var rows = data.slice(1);
-  var todayStr = Utilities.formatDate(new Date(), "Asia/Seoul", "yyyy-MM-dd");
-  var subject = "미접수 클레임 전달건 (" + rows.length + "건) - " + todayStr;
-
-  var webAppUrl = "https://script.google.com/macros/s/AKfycbxACYFrxGPsNimEsbB3rSEUroxm-cHFqmUnL9t2CIhzQGISIZyEirgDXjhHaVOMFvhe/exec";
-
-  var nameIndex = headers.indexOf("품목담당자명");
-  if (nameIndex === -1) nameIndex = 0;
-
-  var htmlBody = "<div style='font-family: Arial, sans-serif; color: #333;'>" +
-    "<h3>안녕하세요. 금일 OMS 미접수 클레임 공유드립니다.</h3>" +
-    "<p style='color: #2980b9;'>※ 아래 표에서 <b>담당자 이름(파란색 링크)</b>을 클릭하시면, 해당 담당자의 클레임만 모아서 볼 수 있습니다.</p>" +
-    "<table style='border-collapse: collapse; width: 100%; font-size: 12px; text-align: center;' border='1'>" +
-    "<thead style='background-color: #f2f2f2; font-weight: bold;'><tr>";
-
-  headers.forEach(function(h) {
-    htmlBody += "<th style='padding: 6px; border: 1px solid #ccc;'>" + h + "</th>";
-  });
-  htmlBody += "</tr></thead><tbody>";
-
-  var seenNames = {};
-
-  rows.forEach(function(row) {
-    htmlBody += "<tr>";
-    row.forEach(function(cell, colIdx) {
-      var cleanCell = String(cell).replace(/^'/, '');
-      
-      if (colIdx === nameIndex && cleanCell !== "") {
-        if (!seenNames[cleanCell]) {
-          var linkUrl = webAppUrl + "?name=" + encodeURIComponent(cleanCell);
-          htmlBody += "<td style='padding: 5px; border: 1px solid #ccc;'>" +
-                      "<a href='" + linkUrl + "' style='color: #0056b3; font-weight: bold; text-decoration: underline;' target='_blank'>" + cleanCell + "</a>" +
-                      "</td>";
-          seenNames[cleanCell] = true;
-        } else {
-          htmlBody += "<td style='padding: 5px; border: 1px solid #ccc;'>" + cleanCell + "</td>";
-        }
-      } else {
-        htmlBody += "<td style='padding: 5px; border: 1px solid #ccc;'>" + cleanCell + "</td>";
-      }
-    });
-    htmlBody += "</tr>";
-  });
-
-  htmlBody += "</tbody></table><br/>감사합니다.</div>";
-
-  GmailApp.sendEmail(recipientEmails, subject, "", {
-    htmlBody: htmlBody
-  });
-  Logger.log("✅ 개인별 서식 저장 지원 메일 발송 완료");
-}
+except Exception as e:
+    print(f"❌ 오류 발생: {e}", flush=True)
+    try:
+        driver.save_screenshot(os.path.join(output_dir, "error_screenshot.png"))
+    except Exception:
+        pass
+finally:
+    driver.quit()
